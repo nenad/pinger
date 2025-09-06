@@ -1,0 +1,37 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build artifacts
+bin/
+build/
+dist/
+
+# Vendor (uncomment if you vendor dependencies)
+vendor/
+
+# Coverage
+coverage.out
+cover.*
+*.coverprofile
+
+# Logs
+*.log
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Env files
+.env
+.env.*
+
+
