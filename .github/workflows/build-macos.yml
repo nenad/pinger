@@ -1,0 +1,153 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Ensure Xcode SDK
+        run: |
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-path
+
+      - name: Build binaries (arm64, amd64) and create universal
+        run: |
+          set -euo pipefail
+          APP_NAME="Pinger"
+          BIN_NAME="pinger"
+          mkdir -p build/arm64 build/amd64 build/universal
+
+          # Build for Apple Silicon
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o build/arm64/${BIN_NAME} .
+
+          # Build for Intel
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o build/amd64/${BIN_NAME} .
+
+          # Create universal binary
+          lipo -create -output build/universal/${BIN_NAME} build/arm64/${BIN_NAME} build/amd64/${BIN_NAME}
+          file build/universal/${BIN_NAME}
+
+      - name: Create .app bundle
+        run: |
+          set -euo pipefail
+          APP_NAME="Pinger"
+          BUNDLE_ROOT="dist/${APP_NAME}.app/Contents"
+          mkdir -p "${BUNDLE_ROOT}/MacOS" "${BUNDLE_ROOT}/Resources"
+
+          # Place the executable
+          cp build/universal/pinger "${BUNDLE_ROOT}/MacOS/${APP_NAME}"
+          chmod +x "${BUNDLE_ROOT}/MacOS/${APP_NAME}"
+
+          # Minimal Info.plist marking app as UIElement (menu bar, no Dock)
+          cat > "${BUNDLE_ROOT}/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Pinger</string>
+            <key>CFBundleDisplayName</key>
+            <string>Pinger</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.github.nenad.pinger</string>
+            <key>CFBundleVersion</key>
+            <string>1.0.0</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0.0</string>
+            <key>CFBundleExecutable</key>
+            <string>Pinger</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleSignature</key>
+            <string>????</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>LSUIElement</key>
+            <true/>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Import Developer ID certificate
+        if: ${{ secrets.MAC_CERT_P12 != '' && secrets.MAC_CERT_PASSWORD != '' }}
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.MAC_CERT_P12 }}
+          p12-password: ${{ secrets.MAC_CERT_PASSWORD }}
+
+      - name: Codesign app bundle
+        if: ${{ secrets.MAC_CODESIGN_IDENTITY != '' }}
+        env:
+          IDENTITY: ${{ secrets.MAC_CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          /usr/bin/codesign --force --options runtime --timestamp --deep \
+            --sign "$IDENTITY" "dist/Pinger.app"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "dist/Pinger.app"
+
+      - name: Prepare zip for notarization
+        if: ${{ secrets.NOTARYTOOL_KEY_ID != '' && secrets.NOTARYTOOL_ISSUER_ID != '' && secrets.NOTARYTOOL_KEY != '' }}
+        run: |
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent "dist/Pinger.app" "Pinger-notarize.zip"
+
+      - name: Notarize with notarytool (wait)
+        if: ${{ secrets.NOTARYTOOL_KEY_ID != '' && secrets.NOTARYTOOL_ISSUER_ID != '' && secrets.NOTARYTOOL_KEY != '' }}
+        env:
+          NOTARY_KEY_B64: ${{ secrets.NOTARYTOOL_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARYTOOL_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          echo "$NOTARY_KEY_B64" | base64 --decode > /tmp/AuthKey.p8
+          xcrun notarytool submit "Pinger-notarize.zip" \
+            --key /tmp/AuthKey.p8 \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+
+      - name: Staple notarization ticket
+        if: ${{ secrets.NOTARYTOOL_KEY_ID != '' && secrets.NOTARYTOOL_ISSUER_ID != '' && secrets.NOTARYTOOL_KEY != '' }}
+        run: |
+          set -euo pipefail
+          xcrun stapler staple "dist/Pinger.app"
+
+      - name: Zip app bundle
+        run: |
+          set -euo pipefail
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "Pinger.app" "Pinger-macOS.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinger-macos-app
+          path: dist/Pinger-macOS.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Pinger-macOS.zip
+          generate_release_notes: true
+
+
