@@ -58,22 +58,13 @@ func isDarkAppearance() bool {
 // BorderColorFor returns the color representing the current state for the inner border.
 // If inFlight is true, ageMs decides the color thresholding.
 // Otherwise, the average of the last up to 5 pings controls the color; any failure forces red.
-func BorderColorFor(history *pinger.History, inFlight bool, ageMs int64) color.Color {
-	if inFlight {
-		switch {
-		case ageMs >= 300:
-			return colOrange
-		case ageMs >= 100:
-			return colYellow
-		default:
-			return colNeutral
-		}
-	}
+func BorderColorFor(history *pinger.History, inFlight int64) color.Color {
 	last := history.Latest(5)
 	if len(last) == 0 {
 		return colNeutral
 	}
-	var sumMs float64
+	// We start with the in-flight current travel
+	var sumMs = float64(inFlight)
 	var countOK int
 	anyFail := false
 	for _, s := range last {
@@ -103,10 +94,10 @@ func BorderColorFor(history *pinger.History, inFlight bool, ageMs int64) color.C
 
 // Render generates a PNG icon representing the latency history as a sparkline.
 // The line color reflects current state via ColorFor.
-func Render(history *pinger.History, inFlight bool, ageMs int64) []byte {
+func Render(history *pinger.History, inFlightAge int64) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	// Paint background color
-	borderColor := BorderColorFor(history, inFlight, ageMs)
+	borderColor := BorderColorFor(history, inFlightAge)
 	if borderColor != colNeutral {
 		draw.Draw(img, img.Bounds(), &image.Uniform{borderColor}, image.Point{}, draw.Src)
 	}

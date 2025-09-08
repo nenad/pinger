@@ -12,13 +12,12 @@ import (
 )
 
 type TrayApp struct {
-	mgr        *pinger.Manager
-	menuItems  []*systray.MenuItem
-	quitItem   *systray.MenuItem
-	target     string
-	lastBucket int
-	lastIcon   []byte
-	iconMu     sync.Mutex
+	mgr       *pinger.Manager
+	menuItems []*systray.MenuItem
+	quitItem  *systray.MenuItem
+	target    string
+	lastIcon  []byte
+	iconMu    sync.Mutex
 }
 
 func NewTrayApp(mgr *pinger.Manager, target string) *TrayApp {
@@ -51,30 +50,24 @@ func (a *TrayApp) onReady() {
 	}()
 
 	// Initial icon
-	a.updateIcon(false, 0)
+	a.updateIcon(0)
 	a.updateMenu()
 
 	// Update on results
 	go func() {
 		for range a.mgr.Results() {
 			a.updateMenu()
-			a.updateIcon(false, 0)
+			// a.updateIcon(0)
 		}
 	}()
 
-	// While in-flight, update icon color by elapsed age (only when bucket changes)
+	// On entering in-flight, update once using the elapsed age to influence background
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for range ticker.C {
-			inFlight, age := a.mgr.IsInFlight()
-			if inFlight {
-				bucket := bucketForAge(age.Milliseconds())
-				if bucket != a.lastBucket {
-					a.lastBucket = bucket
-					a.updateIcon(true, age.Milliseconds())
-				}
-			}
+			_, age := a.mgr.IsInFlight()
+			a.updateIcon(age.Milliseconds())
 		}
 	}()
 }
@@ -100,8 +93,8 @@ func (a *TrayApp) updateMenu() {
 	}
 }
 
-func (a *TrayApp) updateIcon(inFlight bool, ageMs int64) {
-	png := renderer.Render(a.mgr.History(), inFlight, ageMs)
+func (a *TrayApp) updateIcon(inflightAge int64) {
+	png := renderer.Render(a.mgr.History(), inflightAge)
 	a.iconMu.Lock()
 	defer a.iconMu.Unlock()
 	if bytes.Equal(a.lastIcon, png) {
@@ -109,17 +102,4 @@ func (a *TrayApp) updateIcon(inFlight bool, ageMs int64) {
 	}
 	a.lastIcon = png
 	systray.SetIcon(png)
-}
-
-// bucketForAge maps in-flight age to a coarse bucket to avoid excessive icon updates
-// 0: neutral (<100ms), 1: yellow (100-300ms), 2: orange (>=300ms)
-func bucketForAge(ageMs int64) int {
-	switch {
-	case ageMs >= 300:
-		return 2
-	case ageMs >= 100:
-		return 1
-	default:
-		return 0
-	}
 }
