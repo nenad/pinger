@@ -7,6 +7,10 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
 
 	pinger "github.com/nenad/pinger/internal/ping"
 )
@@ -14,16 +18,42 @@ import (
 const (
 	width  = 24
 	height = 24
-	padX   = 3
-	padY   = 4
+	padX   = 0
+	padY   = 0
 )
 
 var (
+	colLine    = color.RGBA{R: 0, G: 0, B: 0, A: 255}
 	colNeutral = color.RGBA{R: 220, G: 220, B: 220, A: 255}
 	colYellow  = color.RGBA{R: 255, G: 200, B: 0, A: 255}
 	colOrange  = color.RGBA{R: 255, G: 120, B: 0, A: 255}
 	colRed     = color.RGBA{R: 230, G: 30, B: 30, A: 255}
 )
+
+var (
+	appearanceMu          sync.Mutex
+	cachedIsDark          bool
+	lastAppearanceCheck   time.Time
+	appearanceCacheWindow = 5 * time.Second
+)
+
+// isDarkAppearance returns true when macOS is in dark mode. Result is cached briefly.
+func isDarkAppearance() bool {
+	appearanceMu.Lock()
+	defer appearanceMu.Unlock()
+	if time.Since(lastAppearanceCheck) < appearanceCacheWindow {
+		return cachedIsDark
+	}
+	lastAppearanceCheck = time.Now()
+	out, err := exec.Command("defaults", "read", "-g", "AppleInterfaceStyle").Output()
+	if err != nil {
+		// Key is absent in light mode
+		cachedIsDark = false
+		return cachedIsDark
+	}
+	cachedIsDark = strings.Contains(strings.ToLower(string(out)), "dark")
+	return cachedIsDark
+}
 
 // BorderColorFor returns the color representing the current state for the inner border.
 // If inFlight is true, ageMs decides the color thresholding.
@@ -75,8 +105,11 @@ func BorderColorFor(history *pinger.History, inFlight bool, ageMs int64) color.C
 // The line color reflects current state via ColorFor.
 func Render(history *pinger.History, inFlight bool, ageMs int64) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	// Transparent background
-	draw.Draw(img, img.Bounds(), &image.Uniform{color.RGBA{0, 0, 0, 0}}, image.Point{}, draw.Src)
+	// Paint background color
+	borderColor := BorderColorFor(history, inFlight, ageMs)
+	if borderColor != colNeutral {
+		draw.Draw(img, img.Bounds(), &image.Uniform{borderColor}, image.Point{}, draw.Src)
+	}
 
 	series := history.Snapshot()
 	n := len(series)
@@ -116,8 +149,11 @@ func Render(history *pinger.History, inFlight bool, ageMs int64) []byte {
 		stepX = plotW / float64(n-1)
 	}
 
-	// Sparkline stroke is always neutral; the border indicates status
-	stroke := colNeutral
+	// Sparkline stroke adapts to appearance: white on dark, black on light
+	var stroke color.Color = colLine
+	if isDarkAppearance() {
+		stroke = color.White
+	}
 
 	// Convert samples to points (oldest to newest)
 	points := make([]image.Point, n)
@@ -140,9 +176,9 @@ func Render(history *pinger.History, inFlight bool, ageMs int64) []byte {
 
 	// Draw axes baseline (optional faint) - skipped to keep visual clean
 
-	// Draw the sparkline with thickness 3
+	// Draw the sparkline with some thickness
 	for i := 1; i < n; i++ {
-		drawThickLine(img, points[i-1], points[i], stroke, 3)
+		drawLine(img, points[i-1], points[i], stroke)
 	}
 
 	// Mark failures as red dots at top
@@ -151,12 +187,6 @@ func Render(history *pinger.History, inFlight bool, ageMs int64) []byte {
 			p := points[i]
 			drawDot(img, image.Pt(p.X, padY), colRed)
 		}
-	}
-
-	// Draw inner border (3px) indicating current status color only if not neutral
-	borderColor := BorderColorFor(history, inFlight, ageMs)
-	if borderColor != colNeutral {
-		drawInnerBorder(img, borderColor, 3)
 	}
 
 	return encode(img)
@@ -203,40 +233,4 @@ func drawLine(img *image.RGBA, p0, p1 image.Point, c color.Color) {
 			y0 += sy
 		}
 	}
-}
-
-// drawThickLine draws a simple thick line by drawing multiple offset lines around the center.
-func drawThickLine(img *image.RGBA, p0, p1 image.Point, c color.Color, thickness int) {
-	if thickness <= 1 {
-		drawLine(img, p0, p1, c)
-		return
-	}
-	// Offsets distribute around center; naive but effective at small sizes
-	half := thickness / 2
-	for off := -half; off <= half; off++ {
-		// Offset in both axes to approximate roundness
-		drawLine(img, image.Pt(p0.X+off, p0.Y), image.Pt(p1.X+off, p1.Y), c)
-		drawLine(img, image.Pt(p0.X, p0.Y+off), image.Pt(p1.X, p1.Y+off), c)
-	}
-}
-
-// drawInnerBorder draws a border along the inside edges of the icon with given thickness.
-func drawInnerBorder(img *image.RGBA, c color.Color, thickness int) {
-	if thickness <= 0 {
-		return
-	}
-	for t := 0; t < thickness; t++ {
-		// Top
-		drawRect(img, image.Rect(0+t, 0+t, width-t, 1+t), c)
-		// Bottom
-		drawRect(img, image.Rect(0+t, height-1-t, width-t, height-t), c)
-		// Left
-		drawRect(img, image.Rect(0+t, 0+t, 1+t, height-t), c)
-		// Right
-		drawRect(img, image.Rect(width-1-t, 0+t, width-t, height-t), c)
-	}
-}
-
-func drawRect(img *image.RGBA, r image.Rectangle, c color.Color) {
-	draw.Draw(img, r, &image.Uniform{c}, image.Point{}, draw.Over)
 }
