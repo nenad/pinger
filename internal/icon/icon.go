@@ -108,25 +108,10 @@ func Render(history *pinger.History, inFlightAge int64) []byte {
 		return encode(img)
 	}
 
-	// Determine vertical scale. Use max of observed latency and a floor for better visuals.
-	var maxMs float64 = 300.0
-	for _, s := range series {
-		if s.Failed {
-			continue
-		}
-		ms := float64(s.Latency.Microseconds()) / 1000.0
-		if ms > maxMs {
-			maxMs = ms
-		}
-	}
 	// Compute x positions
 	plotW := float64(width - 2*padX)
-	plotH := float64(height - 2*padY)
 	if plotW <= 0 {
 		plotW = float64(width)
-	}
-	if plotH <= 0 {
-		plotH = float64(height)
 	}
 
 	// We'll plot last up to 20 samples for density
@@ -156,9 +141,25 @@ func Render(history *pinger.History, inFlightAge int64) []byte {
 			y = 0
 		} else {
 			ms := float64(s.Latency.Microseconds()) / 1000.0
-			// Baseline at bottom for low/consistent latency: y grows with ms
-			ratio := math.Min(1.0, ms/maxMs)
-			y = plotH * ratio
+			// Map into three vertical bands of 8px each
+			// Top is 0, bottom is height
+			switch {
+			case ms < 100:
+				// 0–100ms → occupy top band [0,8); scale 0..100 to 0..8
+				ratio := ms / 100.0
+				y = 8.0 * ratio
+			case ms < 200:
+				// 100–200ms → band [8,16); scale 0..100 to 0..8 and offset by 8
+				ratio := (ms - 100.0) / 100.0
+				y = 8.0 + 8.0*ratio
+			default:
+				// >=200ms → band [16,24]; cap at 24
+				ratio := (ms - 200.0) / 100.0
+				if ratio > 1.0 {
+					ratio = 1.0
+				}
+				y = 16.0 + 8.0*ratio
+			}
 		}
 		x := float64(padX) + float64(i)*stepX
 		yy := float64(height-padY) - y
