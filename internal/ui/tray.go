@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/getlantern/systray"
+
 	renderer "github.com/nenad/pinger/internal/icon"
 	pinger "github.com/nenad/pinger/internal/ping"
 )
@@ -101,5 +102,5 @@ func (a *TrayApp) updateIcon(inflightAge int64) {
 		return
 	}
 	a.lastIcon = png
-	systray.SetIcon(png)
+	systray.SetTemplateIcon(png, png)
 }

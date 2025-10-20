@@ -7,10 +7,6 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
-	"os/exec"
-	"strings"
-	"sync"
-	"time"
 
 	pinger "github.com/nenad/pinger/internal/ping"
 )
@@ -29,31 +25,6 @@ var (
 	colOrange  = color.RGBA{R: 255, G: 120, B: 0, A: 255}
 	colRed     = color.RGBA{R: 230, G: 30, B: 30, A: 255}
 )
-
-var (
-	appearanceMu          sync.Mutex
-	cachedIsDark          bool
-	lastAppearanceCheck   time.Time
-	appearanceCacheWindow = 5 * time.Second
-)
-
-// isDarkAppearance returns true when macOS is in dark mode. Result is cached briefly.
-func isDarkAppearance() bool {
-	appearanceMu.Lock()
-	defer appearanceMu.Unlock()
-	if time.Since(lastAppearanceCheck) < appearanceCacheWindow {
-		return cachedIsDark
-	}
-	lastAppearanceCheck = time.Now()
-	out, err := exec.Command("defaults", "read", "-g", "AppleInterfaceStyle").Output()
-	if err != nil {
-		// Key is absent in light mode
-		cachedIsDark = false
-		return cachedIsDark
-	}
-	cachedIsDark = strings.Contains(strings.ToLower(string(out)), "dark")
-	return cachedIsDark
-}
 
 // BorderColorFor returns the color representing the current state for the inner border.
 // If inFlight is true, ageMs decides the color thresholding.
@@ -127,9 +98,6 @@ func Render(history *pinger.History, inFlightAge int64) []byte {
 
 	// Sparkline stroke adapts to appearance: white on dark, black on light
 	var stroke color.Color = colLine
-	if isDarkAppearance() {
-		stroke = color.White
-	}
 
 	// Convert samples to points (oldest to newest)
 	points := make([]image.Point, n)

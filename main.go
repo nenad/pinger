@@ -4,8 +4,8 @@ import (
 	"flag"
 	"time"
 
-	ui "github.com/nenad/pinger/internal/ui"
 	pinger "github.com/nenad/pinger/internal/ping"
+	"github.com/nenad/pinger/internal/ui"
 )
 
 func main() {
