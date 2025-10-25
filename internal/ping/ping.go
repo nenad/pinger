@@ -3,9 +3,11 @@ package ping
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"time"
 
+	"github.com/nenad/pinger/internal/config"
 	probing "github.com/prometheus-community/pro-bing"
 )
 
@@ -80,6 +82,7 @@ type Manager struct {
 	target        string
 	interval      time.Duration
 	timeout       time.Duration
+	probeMode     config.ProbeMode
 	history       *History
 	mu            sync.RWMutex
 	inFlightStart time.Time
@@ -88,7 +91,7 @@ type Manager struct {
 	resultCh      chan Sample
 }
 
-func NewManager(target string, interval time.Duration, timeout time.Duration, historyCapacity int) *Manager {
+func NewManager(target string, interval time.Duration, timeout time.Duration, probeMode config.ProbeMode, historyCapacity int) *Manager {
 	if target == "" {
 		target = "1.1.1.1"
 	}
@@ -98,18 +101,55 @@ func NewManager(target string, interval time.Duration, timeout time.Duration, hi
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
+	if probeMode != config.ProbeModeICMP && probeMode != config.ProbeModeHTTP {
+		probeMode = config.ProbeModeICMP
+	}
 	return &Manager{
-		target:   target,
-		interval: interval,
-		timeout:  timeout,
-		history:  NewHistory(historyCapacity),
-		resultCh: make(chan Sample, 100),
+		target:    target,
+		interval:  interval,
+		timeout:   timeout,
+		probeMode: probeMode,
+		history:   NewHistory(historyCapacity),
+		resultCh:  make(chan Sample, 100),
 	}
 }
 
 func (m *Manager) Results() <-chan Sample { return m.resultCh }
 
 func (m *Manager) History() *History { return m.history }
+
+func (m *Manager) Target() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.target
+}
+
+func (m *Manager) ProbeMode() config.ProbeMode {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.probeMode
+}
+
+// SetTarget changes the target address. Requires restart to take effect.
+func (m *Manager) SetTarget(target string) {
+	m.mu.Lock()
+	m.target = target
+	m.mu.Unlock()
+}
+
+// SetProbeMode changes the probe mode. Requires restart to take effect.
+func (m *Manager) SetProbeMode(mode config.ProbeMode) {
+	m.mu.Lock()
+	m.probeMode = mode
+	m.mu.Unlock()
+}
+
+// Restart stops and restarts the ping loop.
+func (m *Manager) Restart() {
+	m.Stop()
+	time.Sleep(100 * time.Millisecond) // Give it time to stop
+	m.Start()
+}
 
 func (m *Manager) IsInFlight() (bool, time.Duration) {
 	m.mu.RLock()
@@ -162,10 +202,35 @@ func (m *Manager) doPing(ctx context.Context) {
 	m.markInFlight(true)
 	defer m.markInFlight(false)
 
-	pinger, err := probing.NewPinger(m.target)
+	mode := m.ProbeMode()
+	target := m.Target()
+
+	var sample Sample
+	var err error
+
+	if mode == config.ProbeModeHTTP {
+		sample, err = m.doHTTPProbe(ctx, target)
+	} else {
+		sample, err = m.doICMPPing(ctx, target)
+	}
+
 	if err != nil {
 		m.emitFailure(err)
 		return
+	}
+
+	m.history.Add(sample)
+	select {
+	case m.resultCh <- sample:
+	default:
+		// drop if full
+	}
+}
+
+func (m *Manager) doICMPPing(ctx context.Context, target string) (Sample, error) {
+	pinger, err := probing.NewPinger(target)
+	if err != nil {
+		return Sample{}, err
 	}
 	// Use unprivileged mode to avoid requiring root.
 	pinger.SetPrivileged(false)
@@ -176,8 +241,7 @@ func (m *Manager) doPing(ctx context.Context) {
 	err = pinger.Run() // Blocks until finished
 	rtt := time.Since(start)
 	if err != nil {
-		m.emitFailure(err)
-		return
+		return Sample{}, err
 	}
 	stats := pinger.Statistics()
 	var latency time.Duration
@@ -187,18 +251,36 @@ func (m *Manager) doPing(ctx context.Context) {
 		// Fallback to measured elapsed
 		latency = rtt
 	}
-	sample := Sample{
+	return Sample{
 		Timestamp:   time.Now(),
 		Latency:     latency,
 		Failed:      false,
 		Description: "ok",
+	}, nil
+}
+
+func (m *Manager) doHTTPProbe(ctx context.Context, target string) (Sample, error) {
+	// Attempt TCP connection to port 80
+	address := net.JoinHostPort(target, "80")
+	start := time.Now()
+
+	dialer := net.Dialer{
+		Timeout: m.timeout,
 	}
-	m.history.Add(sample)
-	select {
-	case m.resultCh <- sample:
-	default:
-		// drop if full
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	latency := time.Since(start)
+
+	if err != nil {
+		return Sample{}, err
 	}
+	conn.Close()
+
+	return Sample{
+		Timestamp:   time.Now(),
+		Latency:     latency,
+		Failed:      false,
+		Description: "ok",
+	}, nil
 }
 
 func (m *Manager) emitFailure(err error) {
